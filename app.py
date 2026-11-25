@@ -1,0 +1,540 @@
+import hashlib
+import hmac
+import json
+import os
+import re
+import streamlit as st
+import streamlit.components.v1 as components
+from sqlalchemy import create_engine, text
+
+st.set_page_config(
+    page_title="Barbearia Clássica — Atendimento, Horários & Cortes",
+    page_icon="💈",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+APP_KEY = "barbearia_app"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DIST_DIR = os.path.join(BASE_DIR, "dist")
+INDEX_FILE = os.path.join(DIST_DIR, "index.html")
+LOCAL_DB_FILE = os.path.join(BASE_DIR, "data", "barbearia-db.json")
+LOGO_SVG_FILE = os.path.join(BASE_DIR, "public", "logo-barbearia.svg")
+
+
+def _gerar_sync_token() -> str:
+    db_url = st.secrets.get("DATABASE_URL", os.environ.get("DATABASE_URL", "local"))
+    pin = str(st.secrets.get("APP_PIN", os.environ.get("APP_PIN", "2026"))).strip() or "2026"
+    segredo = f"{db_url}::{pin}".encode("utf-8")
+    return hmac.new(segredo, APP_KEY.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _dados_padrao() -> dict:
+    if os.path.exists(LOCAL_DB_FILE):
+        try:
+            with open(LOCAL_DB_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            pass
+    return {
+        "appointments": [],
+        "barbers": [],
+        "shopSettings": {"shopName": "BARBEARIA CLÁSSICA", "shopLogoUrl": ""},
+        "lunchOverrides": {},
+        "unavailableSlots": {},
+        "barberPhotos": {},
+    }
+
+
+def _inicializar_supabase_storage(sync_token: str) -> dict:
+    db_url = st.secrets.get("DATABASE_URL", os.environ.get("DATABASE_URL", ""))
+    iniciais = _dados_padrao()
+    if not db_url:
+        return iniciais
+
+    engine = create_engine(
+        db_url,
+        connect_args={"connect_timeout": 10},
+        pool_pre_ping=True,
+        pool_recycle=300,
+    )
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS public.app_cloud_storage (
+                app_key TEXT PRIMARY KEY,
+                dados JSONB NOT NULL,
+                updated_at TIMESTAMPTZ DEFAULT now()
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS public.app_cloud_tokens (
+                app_key TEXT PRIMARY KEY,
+                sync_token TEXT NOT NULL,
+                updated_at TIMESTAMPTZ DEFAULT now()
+            )
+        """))
+        conn.execute(text("ALTER TABLE public.app_cloud_storage ENABLE ROW LEVEL SECURITY"))
+        conn.execute(text("ALTER TABLE public.app_cloud_tokens ENABLE ROW LEVEL SECURITY"))
+        conn.execute(text("REVOKE ALL ON TABLE public.app_cloud_storage FROM anon, authenticated"))
+        conn.execute(text("REVOKE ALL ON TABLE public.app_cloud_tokens FROM anon, authenticated"))
+
+        conn.execute(
+            text("""
+                INSERT INTO public.app_cloud_tokens (app_key, sync_token, updated_at)
+                VALUES (:k, :t, now())
+                ON CONFLICT (app_key)
+                DO UPDATE SET sync_token = EXCLUDED.sync_token, updated_at = now()
+            """),
+            {"k": APP_KEY, "t": sync_token},
+        )
+
+        conn.execute(text("DROP FUNCTION IF EXISTS public.sync_app_storage(text, text, jsonb)"))
+        conn.execute(text("""
+            CREATE OR REPLACE FUNCTION public.sync_app_storage(
+                p_app_key text,
+                p_acao text,
+                p_dados jsonb DEFAULT NULL,
+                p_token text DEFAULT ''
+            )
+            RETURNS jsonb
+            LANGUAGE plpgsql
+            SECURITY DEFINER
+            SET search_path = public
+            AS $$
+            DECLARE
+                v_res jsonb;
+            BEGIN
+                IF p_app_key NOT IN ('deposito_alimentos', 'distribuidora_bebidas', 'barbearia_app') THEN
+                    RAISE EXCEPTION 'App key invalida';
+                END IF;
+
+                IF NOT EXISTS (
+                    SELECT 1 FROM public.app_cloud_tokens
+                     WHERE app_key = p_app_key
+                       AND sync_token = COALESCE(p_token, '')
+                ) THEN
+                    RAISE EXCEPTION 'Acesso negado: token de sincronizacao invalido';
+                END IF;
+
+                IF p_acao = 'set' AND p_dados IS NOT NULL THEN
+                    IF octet_length(p_dados::text) > 4194304 THEN
+                        RAISE EXCEPTION 'Payload excede o limite de seguranca (4 MB)';
+                    END IF;
+                    INSERT INTO public.app_cloud_storage (app_key, dados, updated_at)
+                    VALUES (p_app_key, p_dados, now())
+                    ON CONFLICT (app_key)
+                    DO UPDATE SET dados = EXCLUDED.dados, updated_at = now()
+                    RETURNING dados INTO v_res;
+                    RETURN v_res;
+                ELSE
+                    SELECT dados INTO v_res
+                      FROM public.app_cloud_storage
+                     WHERE app_key = p_app_key;
+                    RETURN COALESCE(v_res, '{}'::jsonb);
+                END IF;
+            END;
+            $$
+        """))
+        conn.execute(text(
+            "GRANT EXECUTE ON FUNCTION public.sync_app_storage(text, text, jsonb, text) TO anon, authenticated"
+        ))
+
+        row = conn.execute(
+            text("SELECT dados FROM public.app_cloud_storage WHERE app_key = :k"),
+            {"k": APP_KEY},
+        ).fetchone()
+        if not row:
+            conn.execute(
+                text("""
+                    INSERT INTO public.app_cloud_storage (app_key, dados, updated_at)
+                    VALUES (:k, CAST(:d AS jsonb), now())
+                """),
+                {"k": APP_KEY, "d": json.dumps(iniciais, ensure_ascii=False)},
+            )
+            return iniciais
+        return row[0] if isinstance(row[0], dict) else json.loads(row[0])
+
+
+def _carregar_html_inline() -> str:
+    if not os.path.exists(INDEX_FILE):
+        return "<h2>Build dist/index.html não encontrado. Execute npm run build.</h2>"
+
+    with open(INDEX_FILE, "r", encoding="utf-8") as f:
+        html = f.read()
+
+    # Inline CSS (<link rel="stylesheet" ... href="/assets/...">)
+    def _inline_css(match):
+        href = match.group(1).lstrip("/")
+        css_path = os.path.join(DIST_DIR, href)
+        if os.path.exists(css_path):
+            with open(css_path, "r", encoding="utf-8") as cf:
+                return f"<style>{cf.read()}</style>"
+        return match.group(0)
+
+    html = re.sub(
+        r'<link[^>]+rel=["\']stylesheet["\'][^>]+href=["\']([^"\']+)["\'][^>]*>',
+        _inline_css,
+        html,
+    )
+
+    # Inline JS (<script type="module" ... src="/assets/..."></script>)
+    def _inline_js(match):
+        src = match.group(1).lstrip("/")
+        js_path = os.path.join(DIST_DIR, src)
+        if os.path.exists(js_path):
+            with open(js_path, "r", encoding="utf-8") as jf:
+                js_code = jf.read().replace("</script>", "<\\/script>")
+                return f'<script type="module">{js_code}</script>'
+        return match.group(0)
+
+    html = re.sub(
+        r'<script[^>]+src=["\']([^"\']+)["\'][^>]*></script>',
+        _inline_js,
+        html,
+    )
+
+    # Inline SVG logo if referenced
+    if os.path.exists(LOGO_SVG_FILE):
+        with open(LOGO_SVG_FILE, "r", encoding="utf-8") as lf:
+            svg_raw = lf.read()
+        import base64
+        svg_b64 = base64.b64encode(svg_raw.encode("utf-8")).decode("ascii")
+        html = html.replace("/logo-barbearia.svg", f"data:image/svg+xml;base64,{svg_b64}")
+
+    return html
+
+
+st.markdown("""
+    <style>
+        #MainMenu, header, footer, [data-testid="stToolbar"], [data-testid="stDecoration"] {
+            display: none !important;
+            height: 0 !important;
+        }
+        html, body, .stApp, [data-testid="stAppViewContainer"], .main {
+            max-width: 100vw !important;
+            overflow-x: hidden !important;
+            margin: 0 !important;
+            padding: 0 !important;
+        }
+        .block-container, [data-testid="stMainBlockContainer"] {
+            padding: 0 !important;
+            margin: 0 !important;
+            max-width: 100% !important;
+            width: 100% !important;
+        }
+        [data-testid="stElementContainer"], [data-testid="stIFrame"] {
+            width: 100% !important;
+            max-width: 100vw !important;
+            margin: 0 !important;
+            padding: 0 !important;
+        }
+        iframe {
+            border: none !important;
+            width: 100% !important;
+            max-width: 100vw !important;
+            height: 100dvh !important;
+            min-height: 100vh !important;
+            display: block !important;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
+token_sincronizacao = _gerar_sync_token()
+try:
+    dados_iniciais = _inicializar_supabase_storage(token_sincronizacao)
+except Exception:
+    dados_iniciais = _dados_padrao()
+
+supabase_url = st.secrets.get("SUPABASE_URL", os.environ.get("SUPABASE_URL", ""))
+supabase_key = st.secrets.get("SUPABASE_KEY", os.environ.get("SUPABASE_KEY", ""))
+
+bridge_script = f"""
+<script>
+(function() {{
+  const SUPABASE_URL = {json.dumps(supabase_url)};
+  const SUPABASE_KEY = {json.dumps(supabase_key)};
+  const APP_KEY = {json.dumps(APP_KEY)};
+  const SYNC_TOKEN = {json.dumps(token_sincronizacao)};
+  const originalFetch = window.fetch.bind(window);
+
+  const DEFAULT_BARBERS = [
+    {{
+      id: 'lucas', name: 'Lucas Mendes', nickname: 'Lucas', role: 'Barbeiro Sênior',
+      specialty: 'Degradê, Navalhado & Barba Tradicional', experienceYears: 8,
+      rating: 4.9, reviewsCount: 312,
+      bio: 'Referência em fade limpo, acabamento na navalha e alinhamento geométrico de barba.',
+      initials: 'LM', photoUrl: '', accentColor: '#d4a853',
+      workStart: '09:00', workEnd: '19:00', lunchStart: '12:00', lunchEnd: '13:00',
+      featuredServices: ['corte-degrade', 'corte-navalhado', 'combo-completo']
+    }},
+    {{
+      id: 'rafael', name: 'Rafael Costa', nickname: 'Rafael', role: 'Mestre Visagista',
+      specialty: 'Tesoura, Cortes Clássicos & Visagismo', experienceYears: 11,
+      rating: 5.0, reviewsCount: 428,
+      bio: 'Especialista em cortes estruturados na tesoura, consultoria de estilo e perfil facial.',
+      initials: 'RC', photoUrl: '', accentColor: '#60a5fa',
+      workStart: '09:30', workEnd: '19:30', lunchStart: '13:00', lunchEnd: '14:00',
+      featuredServices: ['corte-tesoura', 'corte-social', 'barba-terapia']
+    }},
+    {{
+      id: 'thiago', name: 'Thiago Rocha', nickname: 'Thiago', role: 'Barbeiro Stylist',
+      specialty: 'Freestyle, Platinado & Barba Terapia', experienceYears: 6,
+      rating: 4.8, reviewsCount: 245,
+      bio: 'Focado em estilos modernos, pigmentação, platinado seguro e cuidados com a pele.',
+      initials: 'TR', photoUrl: '', accentColor: '#34d399',
+      workStart: '10:00', workEnd: '20:00', lunchStart: '13:30', lunchEnd: '14:30',
+      featuredServices: ['corte-freestyle', 'platinado', 'combo-completo']
+    }}
+  ];
+
+  let cloudDb = {json.dumps(dados_iniciais, ensure_ascii=False)};
+  if (!cloudDb || typeof cloudDb !== 'object') cloudDb = {{}};
+  if (!Array.isArray(cloudDb.appointments)) cloudDb.appointments = [];
+  if (!Array.isArray(cloudDb.barbers) || cloudDb.barbers.length === 0) cloudDb.barbers = JSON.parse(JSON.stringify(DEFAULT_BARBERS));
+  if (!cloudDb.shopSettings) cloudDb.shopSettings = {{ shopName: 'BARBEARIA CLÁSSICA', shopLogoUrl: '' }};
+  if (!cloudDb.lunchOverrides) cloudDb.lunchOverrides = {{}};
+  if (!cloudDb.unavailableSlots) cloudDb.unavailableSlots = {{}};
+  if (!cloudDb.barberPhotos) cloudDb.barberPhotos = {{}};
+
+  function generateTimeSlots(workStart, workEnd) {{
+    const [sh, sm] = workStart.split(':').map(Number);
+    const [eh, em] = workEnd.split(':').map(Number);
+    let cur = sh * 60 + sm;
+    const end = eh * 60 + em;
+    const out = [];
+    while (cur < end) {{
+      out.push(String(Math.floor(cur / 60)).padStart(2, '0') + ':' + String(cur % 60).padStart(2, '0'));
+      cur += 30;
+    }}
+    return out;
+  }}
+
+  function getLunchSlots(barberId, date) {{
+    const key = barberId + '_' + date;
+    if (cloudDb.lunchOverrides[key]) return cloudDb.lunchOverrides[key];
+    const b = cloudDb.barbers.find(x => x.id === barberId);
+    return b ? generateTimeSlots(b.lunchStart, b.lunchEnd) : [];
+  }}
+
+  function getUnavailableSlots(barberId, date) {{
+    return cloudDb.unavailableSlots[barberId + '_' + date] || [];
+  }}
+
+  async function pullSupabase() {{
+    if (!SUPABASE_URL || !SUPABASE_KEY) return cloudDb;
+    try {{
+      const r = await originalFetch(SUPABASE_URL + '/rest/v1/rpc/sync_app_storage', {{
+        method: 'POST',
+        headers: {{
+          'Content-Type': 'application/json',
+          'apikey': SUPABASE_KEY,
+          'Authorization': 'Bearer ' + SUPABASE_KEY
+        }},
+        body: JSON.stringify({{ p_app_key: APP_KEY, p_acao: 'get', p_token: SYNC_TOKEN }})
+      }});
+      if (r.ok) {{
+        const d = await r.json();
+        if (d && typeof d === 'object' && Array.isArray(d.appointments)) {{
+          cloudDb = d;
+        }}
+      }}
+    }} catch (_) {{}}
+    return cloudDb;
+  }}
+
+  async function pushSupabase() {{
+    if (!SUPABASE_URL || !SUPABASE_KEY) return;
+    try {{
+      await originalFetch(SUPABASE_URL + '/rest/v1/rpc/sync_app_storage', {{
+        method: 'POST',
+        headers: {{
+          'Content-Type': 'application/json',
+          'apikey': SUPABASE_KEY,
+          'Authorization': 'Bearer ' + SUPABASE_KEY
+        }},
+        body: JSON.stringify({{ p_app_key: APP_KEY, p_acao: 'set', p_dados: cloudDb, p_token: SYNC_TOKEN }})
+      }});
+    }} catch (_) {{}}
+  }}
+
+  const sseListeners = new Set();
+  function notifySse() {{
+    const data = JSON.stringify(cloudDb);
+    sseListeners.forEach(fn => {{
+      try {{ fn({{ data }}); }} catch (_) {{}}
+    }});
+  }}
+
+  // Mock EventSource for /api/events with periodic Supabase sync
+  window.EventSource = function(url) {{
+    const listeners = [];
+    const obj = {{
+      addEventListener: function(type, cb) {{
+        if (type === 'state') {{
+          listeners.push(cb);
+          sseListeners.add(cb);
+          setTimeout(() => cb({{ data: JSON.stringify(cloudDb) }}), 50);
+        }}
+      }},
+      close: function() {{
+        listeners.forEach(cb => sseListeners.delete(cb));
+      }},
+      onerror: null
+    }};
+    return obj;
+  }};
+
+  setInterval(async () => {{
+    const prev = JSON.stringify(cloudDb);
+    await pullSupabase();
+    if (JSON.stringify(cloudDb) !== prev) notifySse();
+  }}, 8000);
+
+  function jsonResp(status, body) {{
+    return new Response(JSON.stringify(body), {{
+      status,
+      headers: {{ 'Content-Type': 'application/json' }}
+    }});
+  }}
+
+  window.fetch = async function(input, init) {{
+    const url = typeof input === 'string' ? input : (input && input.url) || '';
+    if (!url.startsWith('/api/')) return originalFetch(input, init);
+    const method = ((init && init.method) || 'GET').toUpperCase();
+    const body = init && init.body ? JSON.parse(init.body) : {{}};
+
+    if (method === 'GET' && url === '/api/state') {{
+      await pullSupabase();
+      return jsonResp(200, cloudDb);
+    }}
+
+    if (method === 'POST' && url === '/api/appointments') {{
+      await pullSupabase();
+      const {{ barberId, serviceId, date, time, clientName, clientPhone, bookingType, isWalkIn, fromClient }} = body;
+      if (fromClient && !isWalkIn) {{
+        const normName = String(clientName || '').trim().toLowerCase();
+        const normPhone = String(clientPhone || '').replace(/\\D/g, '');
+        const conflict = cloudDb.appointments.find(a => {{
+          if (a.date !== date || a.status === 'Concluído' || a.barberId === barberId) return false;
+          const aName = String(a.clientName || '').trim().toLowerCase();
+          const aPhone = String(a.clientPhone || '').replace(/\\D/g, '');
+          return (normPhone.length >= 8 && aPhone === normPhone) || (normName.length >= 2 && aName === normName);
+        }});
+        if (conflict) {{
+          const ob = cloudDb.barbers.find(b => b.id === conflict.barberId);
+          return jsonResp(409, {{
+            error: `Você já possui um agendamento nesta data com ${{ob ? ob.name : 'outro profissional'}} às ${{conflict.time}}. Só é permitido marcar com 1 profissional por dia.`
+          }});
+        }}
+      }}
+      const lunch = getLunchSlots(barberId, date);
+      const unavail = getUnavailableSlots(barberId, date);
+      const taken = cloudDb.appointments.some(a => a.barberId === barberId && a.date === date && a.time === time);
+      if (lunch.includes(time) || unavail.includes(time) || taken) {{
+        return jsonResp(409, {{ error: 'Este horário acabou de ser ocupado ou bloqueado.' }});
+      }}
+      const apt = {{
+        id: 'apt-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+        barberId, serviceId, date, time,
+        clientName: String(clientName || '').trim(),
+        clientPhone: String(clientPhone || '').trim(),
+        status: 'Aguardando',
+        bookingType: bookingType || 'normal',
+        isWalkIn: Boolean(isWalkIn)
+      }};
+      cloudDb.appointments.push(apt);
+      await pushSupabase();
+      return jsonResp(201, {{ appointment: apt, state: cloudDb }});
+    }}
+
+    if (method === 'PATCH' && url.startsWith('/api/appointments/')) {{
+      const id = decodeURIComponent(url.replace('/api/appointments/', ''));
+      const idx = cloudDb.appointments.findIndex(a => a.id === id);
+      if (idx !== -1 && body.status) {{
+        cloudDb.appointments[idx].status = body.status;
+        await pushSupabase();
+      }}
+      return jsonResp(200, {{ state: cloudDb }});
+    }}
+
+    if (method === 'DELETE' && url.startsWith('/api/appointments/')) {{
+      const id = decodeURIComponent(url.replace('/api/appointments/', ''));
+      cloudDb.appointments = cloudDb.appointments.filter(a => a.id !== id);
+      await pushSupabase();
+      return jsonResp(200, {{ ok: true, state: cloudDb }});
+    }}
+
+    if (method === 'POST' && url === '/api/appointments/reset') {{
+      cloudDb.lunchOverrides = {{}};
+      cloudDb.unavailableSlots = {{}};
+      await pushSupabase();
+      return jsonResp(200, {{ state: cloudDb }});
+    }}
+
+    if (method === 'PUT' && url === '/api/slots/lunch') {{
+      const {{ barberId, date, time }} = body;
+      const key = barberId + '_' + date;
+      const cur = getLunchSlots(barberId, date);
+      const exists = cur.includes(time);
+      cloudDb.lunchOverrides[key] = exists ? cur.filter(t => t !== time) : [...cur, time];
+      await pushSupabase();
+      return jsonResp(200, {{ exists: !exists, state: cloudDb }});
+    }}
+
+    if (method === 'PUT' && url === '/api/slots/unavailable') {{
+      const {{ barberId, date, time }} = body;
+      const key = barberId + '_' + date;
+      const cur = getUnavailableSlots(barberId, date);
+      const exists = cur.includes(time);
+      cloudDb.unavailableSlots[key] = exists ? cur.filter(t => t !== time) : [...cur, time];
+      await pushSupabase();
+      return jsonResp(200, {{ exists: !exists, state: cloudDb }});
+    }}
+
+    if (method === 'PUT' && url === '/api/shop') {{
+      const {{ shopName, shopLogoUrl, barberUpdates }} = body;
+      cloudDb.shopSettings = {{
+        shopName: String(shopName || 'BARBEARIA CLÁSSICA').trim() || 'BARBEARIA CLÁSSICA',
+        shopLogoUrl: String(shopLogoUrl || '')
+      }};
+      if (Array.isArray(barberUpdates)) {{
+        cloudDb.barbers = cloudDb.barbers.map(b => {{
+          const u = barberUpdates.find(x => x.id === b.id);
+          if (!u) return b;
+          const name = String(u.name || b.name).trim() || b.name;
+          const parts = name.split(/\\s+/);
+          const nickname = parts[0] || name;
+          const initials = parts.length >= 2 ? (parts[0][0] + parts[parts.length - 1][0]).toUpperCase() : name.slice(0, 2).toUpperCase();
+          return {{ ...b, name, nickname, initials, role: u.role || b.role, specialty: u.specialty || b.specialty }};
+        }});
+      }}
+      await pushSupabase();
+      return jsonResp(200, {{ state: cloudDb }});
+    }}
+
+    if (method === 'POST' && url === '/api/shop/reset') {{
+      cloudDb.shopSettings = {{ shopName: 'BARBEARIA CLÁSSICA', shopLogoUrl: '' }};
+      cloudDb.barbers = JSON.parse(JSON.stringify(DEFAULT_BARBERS));
+      await pushSupabase();
+      return jsonResp(200, {{ state: cloudDb }});
+    }}
+
+    if (method === 'PUT' && url.startsWith('/api/barbers/') && url.endsWith('/photo')) {{
+      const barberId = decodeURIComponent(url.replace('/api/barbers/', '').replace('/photo', ''));
+      if (body.dataUrl) cloudDb.barberPhotos[barberId] = String(body.dataUrl);
+      else delete cloudDb.barberPhotos[barberId];
+      await pushSupabase();
+      return jsonResp(200, {{ state: cloudDb }});
+    }}
+
+    return jsonResp(404, {{ error: 'Rota não encontrada.' }});
+  }};
+}})();
+</script>
+"""
+
+html_content = _carregar_html_inline()
+html_content = html_content.replace("<head>", "<head>" + bridge_script, 1)
+components.html(html_content, height=920, scrolling=True)
