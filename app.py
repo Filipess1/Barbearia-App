@@ -3,6 +3,9 @@ import hmac
 import json
 import os
 import re
+import threading
+import time
+import urllib.request
 import streamlit as st
 import streamlit.components.v1 as components
 from sqlalchemy import create_engine, text
@@ -13,6 +16,67 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+
+
+def _obter_urls_apps_keepalive() -> list:
+    padrao = [
+        "https://distribuidora-bebidas.streamlit.app",
+        "https://deposito-alimentos.streamlit.app",
+        "https://barbearia-app.streamlit.app",
+        "http://127.0.0.1:8501",
+        "http://127.0.0.1:8502",
+        "http://127.0.0.1:8503",
+    ]
+    extras_raw = str(st.secrets.get("KEEPALIVE_URLS", os.environ.get("KEEPALIVE_URLS", ""))).strip()
+    if extras_raw:
+        for u in extras_raw.split(","):
+            u = u.strip()
+            if u and u not in padrao:
+                padrao.append(u)
+    return padrao
+
+
+@st.cache_resource(show_spinner=False)
+def _iniciar_keepalive_24x7():
+    estado = {"ativo": True, "ultimo_ping": "", "total_pings": 0}
+
+    def _loop():
+        while True:
+            try:
+                for url in _obter_urls_apps_keepalive():
+                    try:
+                        req = urllib.request.Request(
+                            url,
+                            headers={"User-Agent": "Mozilla/5.0 (Streamlit-KeepAlive-24x7)"},
+                        )
+                        with urllib.request.urlopen(req, timeout=8) as r:
+                            _ = r.status
+                    except Exception:
+                        pass
+                sb_url = st.secrets.get("SUPABASE_URL", os.environ.get("SUPABASE_URL", ""))
+                sb_key = st.secrets.get("SUPABASE_KEY", os.environ.get("SUPABASE_KEY", ""))
+                if sb_url and sb_key:
+                    try:
+                        req_sb = urllib.request.Request(
+                            f"{sb_url}/rest/v1/",
+                            headers={"apikey": sb_key, "Authorization": f"Bearer {sb_key}"},
+                        )
+                        with urllib.request.urlopen(req_sb, timeout=8) as r:
+                            _ = r.status
+                    except Exception:
+                        pass
+                estado["ultimo_ping"] = time.strftime("%d/%m/%Y %H:%M:%S")
+                estado["total_pings"] += 1
+            except Exception:
+                pass
+            time.sleep(240)
+
+    t = threading.Thread(target=_loop, daemon=True)
+    t.start()
+    return estado
+
+
+_keepalive_info = _iniciar_keepalive_24x7()
 
 APP_KEY = "barbearia_app"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
