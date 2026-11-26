@@ -10,6 +10,8 @@ import streamlit as st
 import streamlit.components.v1 as components
 from sqlalchemy import create_engine, text
 
+from licencas import CATALOGO_APPS, renderizar_painel_admin_licencas, validar_licenca
+
 st.set_page_config(
     page_title="Barbearia Clássica — Atendimento, Horários & Cortes",
     page_icon="💈",
@@ -23,9 +25,12 @@ def _obter_urls_apps_keepalive() -> list:
         "https://distribuidora-bebidas.streamlit.app",
         "https://deposito-alimentos.streamlit.app",
         "https://barbearia-app.streamlit.app",
+        "https://safe-training-monitor-stm.streamlit.app",
+        "https://safe-training-monitor.streamlit.app",
         "http://127.0.0.1:8501",
         "http://127.0.0.1:8502",
         "http://127.0.0.1:8503",
+        "http://127.0.0.1:8504",
     ]
     extras_raw = str(st.secrets.get("KEEPALIVE_URLS", os.environ.get("KEEPALIVE_URLS", ""))).strip()
     if extras_raw:
@@ -86,11 +91,42 @@ LOCAL_DB_FILE = os.path.join(BASE_DIR, "data", "barbearia-db.json")
 LOGO_SVG_FILE = os.path.join(BASE_DIR, "public", "logo-barbearia.svg")
 
 
-def _gerar_sync_token() -> str:
+def _gerar_sync_token(tenant_app_key: str = APP_KEY) -> str:
     db_url = st.secrets.get("DATABASE_URL", os.environ.get("DATABASE_URL", "local"))
     pin = str(st.secrets.get("APP_PIN", os.environ.get("APP_PIN", "2026"))).strip() or "2026"
     segredo = f"{db_url}::{pin}".encode("utf-8")
-    return hmac.new(segredo, APP_KEY.encode("utf-8"), hashlib.sha256).hexdigest()
+    return hmac.new(segredo, tenant_app_key.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _resolver_licenca_barbearia() -> dict:
+    chave_padrao = CATALOGO_APPS[APP_KEY]["chave_mestre"]
+    raw_lic = st.query_params.get("lic", "")
+    if raw_lic:
+        st.session_state["barb_licenca_chave"] = str(raw_lic).strip().upper()
+    chave_atual = st.session_state.get("barb_licenca_chave", chave_padrao)
+    res_lic = validar_licenca(chave_atual, APP_KEY)
+    if not res_lic.get("valida"):
+        _, col_c, _ = st.columns([1, 1.5, 1])
+        with col_c:
+            st.markdown("<div style='height:8vh'></div>", unsafe_allow_html=True)
+            st.error(f"⛔ **Sistema Temporariamente Indisponível** — {res_lic.get('motivo', 'Licença expirada ou bloqueada.')}")
+            st.info("Se você é o proprietário da barbearia, insira uma nova chave válida abaixo ou renove sua assinatura com o suporte.")
+            nova_chave = st.text_input("🔑 Informar Chave de Licença:", value=chave_atual, key="barb_revalidar_chave")
+            if st.button("Ativar / Verificar Licença", type="primary", use_container_width=True):
+                st.session_state["barb_licenca_chave"] = nova_chave.strip().upper()
+                st.rerun()
+            with st.expander("💼 Painel do Proprietário (SaaS) — Renovar / Gerar Licenças", expanded=False):
+                renderizar_painel_admin_licencas(APP_KEY, "barb_blk")
+        st.stop()
+    return res_lic
+
+
+licenca_info_atual = _resolver_licenca_barbearia()
+TENANT_APP_KEY = licenca_info_atual["tenant_app_key"]
+LICENCA_OBJ = licenca_info_atual["licenca"]
+if TENANT_APP_KEY != APP_KEY:
+    _slug_lic = LICENCA_OBJ["chave"].replace(":", "_")
+    LOCAL_DB_FILE = os.path.join(BASE_DIR, "data", f"barbearia-db-{_slug_lic}.json")
 
 
 def _dados_padrao() -> dict:
@@ -112,7 +148,7 @@ def _dados_padrao() -> dict:
     }
 
 
-def _inicializar_supabase_storage(sync_token: str) -> dict:
+def _inicializar_supabase_storage(sync_token: str, tenant_app_key: str = APP_KEY) -> dict:
     db_url = st.secrets.get("DATABASE_URL", os.environ.get("DATABASE_URL", ""))
     iniciais = _dados_padrao()
     if not db_url:
@@ -151,7 +187,7 @@ def _inicializar_supabase_storage(sync_token: str) -> dict:
                 ON CONFLICT (app_key)
                 DO UPDATE SET sync_token = EXCLUDED.sync_token, updated_at = now()
             """),
-            {"k": APP_KEY, "t": sync_token},
+            {"k": tenant_app_key, "t": sync_token},
         )
 
         conn.execute(text("DROP FUNCTION IF EXISTS public.sync_app_storage(text, text, jsonb)"))
@@ -170,7 +206,11 @@ def _inicializar_supabase_storage(sync_token: str) -> dict:
             DECLARE
                 v_res jsonb;
             BEGIN
-                IF p_app_key NOT IN ('deposito_alimentos', 'distribuidora_bebidas', 'barbearia_app') THEN
+                IF NOT (
+                    p_app_key LIKE 'deposito_alimentos%'
+                    OR p_app_key LIKE 'distribuidora_bebidas%'
+                    OR p_app_key LIKE 'barbearia_app%'
+                ) THEN
                     RAISE EXCEPTION 'App key invalida';
                 END IF;
 
@@ -207,7 +247,7 @@ def _inicializar_supabase_storage(sync_token: str) -> dict:
 
         row = conn.execute(
             text("SELECT dados FROM public.app_cloud_storage WHERE app_key = :k"),
-            {"k": APP_KEY},
+            {"k": tenant_app_key},
         ).fetchone()
         if not row:
             conn.execute(
@@ -215,7 +255,7 @@ def _inicializar_supabase_storage(sync_token: str) -> dict:
                     INSERT INTO public.app_cloud_storage (app_key, dados, updated_at)
                     VALUES (:k, CAST(:d AS jsonb), now())
                 """),
-                {"k": APP_KEY, "d": json.dumps(iniciais, ensure_ascii=False)},
+                {"k": tenant_app_key, "d": json.dumps(iniciais, ensure_ascii=False)},
             )
             return iniciais
         return row[0] if isinstance(row[0], dict) else json.loads(row[0])
@@ -305,9 +345,9 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-token_sincronizacao = _gerar_sync_token()
+token_sincronizacao = _gerar_sync_token(TENANT_APP_KEY)
 try:
-    dados_iniciais = _inicializar_supabase_storage(token_sincronizacao)
+    dados_iniciais = _inicializar_supabase_storage(token_sincronizacao, TENANT_APP_KEY)
 except Exception:
     dados_iniciais = _dados_padrao()
 
@@ -319,7 +359,7 @@ bridge_script = f"""
 (function() {{
   const SUPABASE_URL = {json.dumps(supabase_url)};
   const SUPABASE_KEY = {json.dumps(supabase_key)};
-  const APP_KEY = {json.dumps(APP_KEY)};
+  const APP_KEY = {json.dumps(TENANT_APP_KEY)};
   const SYNC_TOKEN = {json.dumps(token_sincronizacao)};
   const originalFetch = window.fetch.bind(window);
 
@@ -602,3 +642,20 @@ bridge_script = f"""
 html_content = _carregar_html_inline()
 html_content = html_content.replace("<head>", "<head>" + bridge_script, 1)
 components.html(html_content, height=920, scrolling=True)
+
+with st.expander("💼 Administração SaaS — Trocar Chave de Licença ou Gerenciar Clientes", expanded=False):
+    c_lic1, c_lic2 = st.columns([3, 1])
+    with c_lic1:
+        nova_ch = st.text_input(
+            f"Licença Ativa: {LICENCA_OBJ.get('chave')} ({LICENCA_OBJ.get('cliente_nome')})",
+            value=LICENCA_OBJ.get("chave", ""),
+            key="barb_troca_lic_input",
+        )
+    with c_lic2:
+        st.write("")
+        st.write("")
+        if st.button("Aplicar Licença", use_container_width=True, key="btn_barb_trocar_lic"):
+            st.session_state["barb_licenca_chave"] = nova_ch.strip().upper()
+            st.rerun()
+    st.divider()
+    renderizar_painel_admin_licencas(APP_KEY, "barb_rodape")
