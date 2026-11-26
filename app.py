@@ -597,6 +597,33 @@ bridge_script = f"""
       return jsonResp(200, {{ exists: !exists, state: cloudDb }});
     }}
 
+    if (method === 'PUT' && url === '/api/slots/unavailable-period') {{
+      const {{ barberId, date, period }} = body;
+      const targets = barberId === 'all' ? cloudDb.barbers : cloudDb.barbers.filter(b => b.id === barberId);
+      const getPeriodSlots = (b) => {{
+        const all = generateTimeSlots(b.workStart, b.workEnd);
+        if (period === 'morning') return all.filter(t => t < '12:00');
+        if (period === 'afternoon') return all.filter(t => t >= '12:00');
+        return all;
+      }};
+      const allAlreadyBlocked = targets.length > 0 && targets.every(b => {{
+        const pSlots = getPeriodSlots(b);
+        const cur = getUnavailableSlots(b.id, date);
+        return pSlots.length > 0 && pSlots.every(t => cur.includes(t));
+      }});
+      targets.forEach(b => {{
+        const key = b.id + '_' + date;
+        const cur = new Set(getUnavailableSlots(b.id, date));
+        getPeriodSlots(b).forEach(t => {{
+          if (allAlreadyBlocked) cur.delete(t);
+          else cur.add(t);
+        }});
+        cloudDb.unavailableSlots[key] = Array.from(cur);
+      }});
+      await pushSupabase();
+      return jsonResp(200, {{ blocked: !allAlreadyBlocked, state: cloudDb }});
+    }}
+
     if (method === 'PUT' && url === '/api/shop') {{
       const {{ shopName, shopLogoUrl, barberUpdates }} = body;
       cloudDb.shopSettings = {{

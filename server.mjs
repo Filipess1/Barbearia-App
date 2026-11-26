@@ -526,6 +526,52 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { exists: !exists, state: db });
     }
 
+    // Toggle unavailable period (morning, afternoon, day)
+    if (req.method === 'PUT' && pathname === '/api/slots/unavailable-period') {
+      const { barberId, date, period } = await readJsonBody(req);
+      if (!barberId || !date || !period) {
+        return sendJson(res, 400, { error: 'barberId, date e period são obrigatórios.' });
+      }
+      const targets =
+        barberId === 'all' ? db.barbers : db.barbers.filter((b) => b.id === barberId);
+      const getPeriodSlots = (b) => {
+        const [sh, sm] = b.workStart.split(':').map(Number);
+        const [eh, em] = b.workEnd.split(':').map(Number);
+        let cur = sh * 60 + sm;
+        const end = eh * 60 + em;
+        const all = [];
+        while (cur < end) {
+          all.push(
+            String(Math.floor(cur / 60)).padStart(2, '0') +
+              ':' +
+              String(cur % 60).padStart(2, '0')
+          );
+          cur += 30;
+        }
+        if (period === 'morning') return all.filter((t) => t < '12:00');
+        if (period === 'afternoon') return all.filter((t) => t >= '12:00');
+        return all;
+      };
+      const allAlreadyBlocked =
+        targets.length > 0 &&
+        targets.every((b) => {
+          const pSlots = getPeriodSlots(b);
+          const cur = getUnavailableSlots(b.id, date);
+          return pSlots.length > 0 && pSlots.every((t) => cur.includes(t));
+        });
+      for (const b of targets) {
+        const key = `${b.id}_${date}`;
+        const cur = new Set(getUnavailableSlots(b.id, date));
+        for (const t of getPeriodSlots(b)) {
+          if (allAlreadyBlocked) cur.delete(t);
+          else cur.add(t);
+        }
+        db.unavailableSlots[key] = Array.from(cur);
+      }
+      saveDb();
+      return sendJson(res, 200, { blocked: !allAlreadyBlocked, state: db });
+    }
+
     // Update shop settings & barber names
     if (req.method === 'PUT' && pathname === '/api/shop') {
       const { shopName, shopLogoUrl, barberUpdates } = await readJsonBody(req);

@@ -30,7 +30,7 @@ interface ServerState {
 }
 
 export function App() {
-  const days = useMemo(() => getUpcomingDays(5), []);
+  const days = useMemo(() => getUpcomingDays(7), []);
   const [activeTab, setActiveTab] = useState<AppTab>('horarios');
   const [selectedDate, setSelectedDate] = useState<string>(days[0].dateStr);
   const [proSlotMode, setProSlotMode] = useState<ProSlotMode>('book');
@@ -192,6 +192,30 @@ export function App() {
         json.exists
           ? `Horário ${time} marcado como indisponível.`
           : `Horário ${time} liberado novamente.`
+      );
+    } catch {
+      showToast('Erro ao comunicar com o servidor.');
+    }
+  };
+
+  const handleToggleUnavailablePeriod = async (
+    barberId: string,
+    period: 'morning' | 'afternoon' | 'day'
+  ) => {
+    try {
+      const res = await fetch('/api/slots/unavailable-period', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ barberId, date: selectedDate, period }),
+      });
+      const json = await res.json();
+      if (json.state) applyServerState(json.state);
+      const label =
+        period === 'morning' ? 'Manhã' : period === 'afternoon' ? 'Tarde' : 'Dia todo';
+      showToast(
+        json.blocked
+          ? `${label} marcada como indisponível.`
+          : `${label} liberada novamente.`
       );
     } catch {
       showToast('Erro ao comunicar com o servidor.');
@@ -445,6 +469,7 @@ export function App() {
             getUnavailableSlots={getUnavailableSlots}
             onToggleLunchSlot={handleToggleLunchSlot}
             onToggleUnavailableSlot={handleToggleUnavailableSlot}
+            onToggleUnavailablePeriod={handleToggleUnavailablePeriod}
             onSelectSlot={(barberId, time) =>
               setModalState({
                 isOpen: true,

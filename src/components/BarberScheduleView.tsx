@@ -24,6 +24,7 @@ interface BarberScheduleViewProps {
   getUnavailableSlots: (barberId: string, date: string) => string[];
   onToggleLunchSlot: (barberId: string, time: string) => void;
   onToggleUnavailableSlot: (barberId: string, time: string) => void;
+  onToggleUnavailablePeriod: (barberId: string, period: 'morning' | 'afternoon' | 'day') => void;
   onSelectSlot: (barberId: string, time: string) => void;
   onSelectOccupiedSlot: (appointment: Appointment) => void;
   barberPhotos: Record<string, string>;
@@ -47,6 +48,7 @@ export function BarberScheduleView({
   getUnavailableSlots,
   onToggleLunchSlot,
   onToggleUnavailableSlot,
+  onToggleUnavailablePeriod,
   onSelectSlot,
   onSelectOccupiedSlot,
   barberPhotos,
@@ -196,20 +198,50 @@ export function BarberScheduleView({
           </div>
 
           {proSlotMode !== 'book' && (
-            <div className="pro-mode-banner">
+            <div className="pro-mode-banner" style={{ flexWrap: 'wrap', gap: 8 }}>
               <span>
                 {proSlotMode === 'lunch'
                   ? 'Modo Almoço ativo: clique nos horários abaixo para marcar ou remover o almoço.'
-                  : 'Modo Indisponível ativo: clique nos horários abaixo para bloquear ou liberar.'}
+                  : 'Modo Indisponível ativo: clique nos horários ou bloqueie um período inteiro.'}
               </span>
-              <button
-                type="button"
-                className="btn-secondary"
-                style={{ padding: '5px 10px', fontSize: '0.78rem' }}
-                onClick={() => onChangeProSlotMode('book')}
-              >
-                Concluir edição
-              </button>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+                {proSlotMode === 'unavailable' && (
+                  <>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      style={{ padding: '5px 10px', fontSize: '0.78rem' }}
+                      onClick={() => onToggleUnavailablePeriod('all', 'morning')}
+                    >
+                      ☀️ Manhã Indisponível (Todos)
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      style={{ padding: '5px 10px', fontSize: '0.78rem' }}
+                      onClick={() => onToggleUnavailablePeriod('all', 'afternoon')}
+                    >
+                      🌇 Tarde Indisponível (Todos)
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      style={{ padding: '5px 10px', fontSize: '0.78rem' }}
+                      onClick={() => onToggleUnavailablePeriod('all', 'day')}
+                    >
+                      🚫 Dia Todo Indisponível (Todos)
+                    </button>
+                  </>
+                )}
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  style={{ padding: '5px 10px', fontSize: '0.78rem' }}
+                  onClick={() => onChangeProSlotMode('book')}
+                >
+                  Concluir edição
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -364,6 +396,57 @@ export function BarberScheduleView({
                     ? 'Horários — Clique em livre para agendar ou ocupado para desmarcar'
                     : 'Horários Disponíveis — Clique para agendar'}
                 </div>
+                {session.role === 'pro' && (() => {
+                  const morningSlots = slots.filter((t) => t < '12:00');
+                  const afternoonSlots = slots.filter((t) => t >= '12:00');
+                  const allMorningBlocked =
+                    morningSlots.length > 0 && morningSlots.every((t) => unavailSlots.has(t));
+                  const allAfternoonBlocked =
+                    afternoonSlots.length > 0 && afternoonSlots.every((t) => unavailSlots.has(t));
+                  const allDayBlocked =
+                    slots.length > 0 && slots.every((t) => unavailSlots.has(t));
+                  return (
+                    <div
+                      style={{
+                        display: 'flex',
+                        flexWrap: 'wrap',
+                        gap: 6,
+                        marginBottom: 10,
+                      }}
+                    >
+                      <button
+                        type="button"
+                        className={`pro-mode-btn ${allMorningBlocked ? 'unavail-active' : ''}`}
+                        style={{ padding: '4px 9px', fontSize: '0.74rem' }}
+                        onClick={() => onToggleUnavailablePeriod(barber.id, 'morning')}
+                        title="Bloquear ou liberar toda a manhã (< 12:00)"
+                      >
+                        <Ban size={12} />
+                        {allMorningBlocked ? 'Liberar Manhã' : 'Manhã Indisp.'}
+                      </button>
+                      <button
+                        type="button"
+                        className={`pro-mode-btn ${allAfternoonBlocked ? 'unavail-active' : ''}`}
+                        style={{ padding: '4px 9px', fontSize: '0.74rem' }}
+                        onClick={() => onToggleUnavailablePeriod(barber.id, 'afternoon')}
+                        title="Bloquear ou liberar toda a tarde (>= 12:00)"
+                      >
+                        <Ban size={12} />
+                        {allAfternoonBlocked ? 'Liberar Tarde' : 'Tarde Indisp.'}
+                      </button>
+                      <button
+                        type="button"
+                        className={`pro-mode-btn ${allDayBlocked ? 'unavail-active' : ''}`}
+                        style={{ padding: '4px 9px', fontSize: '0.74rem' }}
+                        onClick={() => onToggleUnavailablePeriod(barber.id, 'day')}
+                        title="Bloquear ou liberar o dia inteiro"
+                      >
+                        <Ban size={12} />
+                        {allDayBlocked ? 'Liberar Dia' : 'Dia Todo Indisp.'}
+                      </button>
+                    </div>
+                  );
+                })()}
                 <div className="slots-grid">
                   {slots.map((time) => {
                     const lunch = lunchSlots.has(time);
