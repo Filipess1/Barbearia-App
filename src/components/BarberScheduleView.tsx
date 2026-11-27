@@ -9,6 +9,7 @@ import {
   UserSession,
 } from '../types';
 import { formatBRL, generateTimeSlots } from '../data/barbershopData';
+import { buildBarberOccupiedMap } from '../utils/scheduleUtils';
 
 interface BarberScheduleViewProps {
   barbers: Barber[];
@@ -253,16 +254,15 @@ export function BarberScheduleView({
           const lunchSlots = new Set(getLunchSlots(barber.id, selectedDate));
           const unavailSlots = new Set(getUnavailableSlots(barber.id, selectedDate));
 
-          const barberDayAppointments = appointments.filter(
-            (a) => a.barberId === barber.id && a.date === selectedDate
+          const occupancyMap = buildBarberOccupiedMap(
+            appointments,
+            services,
+            barber.id,
+            selectedDate
           );
 
-          const appointmentByTime = new Map<string, Appointment>();
-          barberDayAppointments.forEach((a) => appointmentByTime.set(a.time, a));
-
           const availableSlots = slots.filter(
-            (t) =>
-              !lunchSlots.has(t) && !unavailSlots.has(t) && !appointmentByTime.has(t)
+            (t) => !lunchSlots.has(t) && !unavailSlots.has(t) && !occupancyMap.has(t)
           );
 
           const barberServices = services.filter((s) =>
@@ -451,7 +451,9 @@ export function BarberScheduleView({
                   {slots.map((time) => {
                     const lunch = lunchSlots.has(time);
                     const unavailable = unavailSlots.has(time);
-                    const apt = appointmentByTime.get(time);
+                    const occ = occupancyMap.get(time);
+                    const apt = occ?.appointment;
+                    const isContinuation = occ?.isContinuation ?? false;
 
                     if (lunch) {
                       const canToggleLunch =
@@ -514,7 +516,9 @@ export function BarberScheduleView({
                           : apt.isWalkIn
                           ? 'slot-walkin'
                           : '';
-                      const subLabel = own
+                      const subLabel = isContinuation
+                        ? 'Em curso'
+                        : own
                         ? 'Seu horário'
                         : session.role === 'pro'
                         ? apt.bookingType === 'preferencial'

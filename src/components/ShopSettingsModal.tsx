@@ -7,11 +7,20 @@ interface ShopSettingsModalProps {
   onClose: () => void;
   shopName: string;
   shopLogoUrl: string;
+  loyaltyGoal: number;
   barbers: Barber[];
   onSave: (data: {
     shopName: string;
     shopLogoUrl: string;
-    barberUpdates: Array<{ id: string; name: string; role: string; specialty: string }>;
+    loyaltyGoal: number;
+    barberUpdates: Array<{
+      id: string;
+      name: string;
+      role: string;
+      specialty: string;
+      commissionPercent: number;
+    }>;
+    pinUpdates: Record<string, string>;
   }) => void;
   onResetDefaults: () => void;
 }
@@ -21,18 +30,23 @@ export function ShopSettingsModal({
   onClose,
   shopName,
   shopLogoUrl,
+  loyaltyGoal,
   barbers,
   onSave,
   onResetDefaults,
 }: ShopSettingsModalProps) {
   const [draftShopName, setDraftShopName] = useState(shopName);
   const [draftLogo, setDraftLogo] = useState(shopLogoUrl);
+  const [draftLoyaltyGoal, setDraftLoyaltyGoal] = useState(loyaltyGoal);
+  const [draftReceptionPin, setDraftReceptionPin] = useState('');
   const [draftBarbers, setDraftBarbers] = useState(
     barbers.map((b) => ({
       id: b.id,
       name: b.name,
       role: b.role,
       specialty: b.specialty,
+      commissionPercent: b.commissionPercent ?? 50,
+      newPin: '',
     }))
   );
 
@@ -40,15 +54,19 @@ export function ShopSettingsModal({
     if (!isOpen) return;
     setDraftShopName(shopName);
     setDraftLogo(shopLogoUrl);
+    setDraftLoyaltyGoal(loyaltyGoal);
+    setDraftReceptionPin('');
     setDraftBarbers(
       barbers.map((b) => ({
         id: b.id,
         name: b.name,
         role: b.role,
         specialty: b.specialty,
+        commissionPercent: b.commissionPercent ?? 50,
+        newPin: '',
       }))
     );
-  }, [isOpen, shopName, shopLogoUrl, barbers]);
+  }, [isOpen, shopName, shopLogoUrl, loyaltyGoal, barbers]);
 
   if (!isOpen) return null;
 
@@ -80,8 +98,8 @@ export function ShopSettingsModal({
 
   const handleBarberChange = (
     id: string,
-    field: 'name' | 'role' | 'specialty',
-    value: string
+    field: 'name' | 'role' | 'specialty' | 'commissionPercent' | 'newPin',
+    value: string | number
   ) => {
     setDraftBarbers((prev) =>
       prev.map((b) => (b.id === id ? { ...b, [field]: value } : b))
@@ -90,15 +108,24 @@ export function ShopSettingsModal({
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
+    const pinUpdates: Record<string, string> = {};
+    if (draftReceptionPin.trim()) pinUpdates.all = draftReceptionPin.trim();
+    draftBarbers.forEach((b) => {
+      if (b.newPin.trim()) pinUpdates[b.id] = b.newPin.trim();
+    });
+
     onSave({
       shopName: draftShopName.trim() || 'BARBEARIA CLÁSSICA',
       shopLogoUrl: draftLogo,
+      loyaltyGoal: Math.max(3, Math.min(30, Number(draftLoyaltyGoal) || 10)),
       barberUpdates: draftBarbers.map((b) => ({
-        ...b,
+        id: b.id,
         name: b.name.trim() || 'Profissional',
         role: b.role.trim() || 'Barbeiro',
         specialty: b.specialty.trim(),
+        commissionPercent: Math.max(0, Math.min(100, Number(b.commissionPercent) || 50)),
       })),
+      pinUpdates,
     });
     onClose();
   };
@@ -112,7 +139,7 @@ export function ShopSettingsModal({
               Personalizar Barbearia
             </h3>
             <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-              Edite o nome da barbearia, a logo e os nomes dos profissionais
+              Nome, logo, profissionais, comissões, fidelidade e PINs
             </p>
           </div>
           <button
@@ -127,36 +154,52 @@ export function ShopSettingsModal({
         </div>
 
         <div className="modal-body">
-          <div className="form-field">
-            <label className="form-label" htmlFor="shop-name-input">
-              Nome da Barbearia
-            </label>
-            <input
-              id="shop-name-input"
-              type="text"
-              className="form-input"
-              value={draftShopName}
-              onChange={(e) => setDraftShopName(e.target.value)}
-              placeholder="Ex: Barbearia Clássica"
-              required
-            />
+          <div className="form-row-2">
+            <div className="form-field">
+              <label className="form-label" htmlFor="shop-name-input">
+                Nome da Barbearia
+              </label>
+              <input
+                id="shop-name-input"
+                type="text"
+                className="form-input"
+                value={draftShopName}
+                onChange={(e) => setDraftShopName(e.target.value)}
+                placeholder="Ex: Barbearia Clássica"
+                required
+              />
+            </div>
+
+            <div className="form-field">
+              <label className="form-label" htmlFor="loyalty-goal-input">
+                Meta Cartão Fidelidade (cortes)
+              </label>
+              <input
+                id="loyalty-goal-input"
+                type="number"
+                min={3}
+                max={30}
+                className="form-input"
+                value={draftLoyaltyGoal}
+                onChange={(e) => setDraftLoyaltyGoal(Number(e.target.value))}
+              />
+            </div>
           </div>
 
-          <div className="form-field">
-            <span className="form-label">Logo da Barbearia</span>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-              <div className="brand-icon" style={{ width: 58, height: 58 }}>
-                <img
-                  src={draftLogo || '/logo-barbearia.svg'}
-                  alt="Prévia da logo"
-                  className="brand-logo-img"
-                />
-              </div>
-
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                <label className="btn-secondary" style={{ cursor: 'pointer' }}>
+          <div className="form-row-2">
+            <div className="form-field">
+              <span className="form-label">Logo da Barbearia</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <div className="brand-icon" style={{ width: 48, height: 48 }}>
+                  <img
+                    src={draftLogo || '/logo-barbearia.svg'}
+                    alt="Prévia da logo"
+                    className="brand-logo-img"
+                  />
+                </div>
+                <label className="btn-secondary" style={{ cursor: 'pointer', padding: '7px 11px' }}>
                   <Camera size={14} />
-                  Trocar Logo
+                  Trocar
                   <input
                     type="file"
                     accept="image/*"
@@ -164,17 +207,32 @@ export function ShopSettingsModal({
                     onChange={handleLogoUpload}
                   />
                 </label>
-
                 {draftLogo && (
                   <button
                     type="button"
                     className="btn-secondary"
+                    style={{ padding: '7px 10px' }}
                     onClick={() => setDraftLogo('')}
                   >
-                    Usar Logo Padrão
+                    Padrão
                   </button>
                 )}
               </div>
+            </div>
+
+            <div className="form-field">
+              <label className="form-label" htmlFor="pin-all-input">
+                Novo PIN Recepção (opcional)
+              </label>
+              <input
+                id="pin-all-input"
+                type="password"
+                inputMode="numeric"
+                className="form-input"
+                placeholder="Manter atual (padrão 1234)"
+                value={draftReceptionPin}
+                onChange={(e) => setDraftReceptionPin(e.target.value)}
+              />
             </div>
           </div>
 
@@ -188,7 +246,7 @@ export function ShopSettingsModal({
             }}
           >
             <span className="form-label" style={{ color: 'var(--gold)' }}>
-              Nomes dos 3 Profissionais
+              Profissionais, Comissões e PIN Individual
             </span>
 
             {draftBarbers.map((barber, idx) => (
@@ -220,6 +278,45 @@ export function ShopSettingsModal({
                       value={barber.role}
                       onChange={(e) =>
                         handleBarberChange(barber.id, 'role', e.target.value)
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div className="form-row-2">
+                  <div className="form-field">
+                    <label className="form-label" htmlFor={`barber-comm-${barber.id}`}>
+                      Comissão (%)
+                    </label>
+                    <input
+                      id={`barber-comm-${barber.id}`}
+                      type="number"
+                      min={0}
+                      max={100}
+                      className="form-input"
+                      value={barber.commissionPercent}
+                      onChange={(e) =>
+                        handleBarberChange(
+                          barber.id,
+                          'commissionPercent',
+                          Number(e.target.value)
+                        )
+                      }
+                    />
+                  </div>
+                  <div className="form-field">
+                    <label className="form-label" htmlFor={`barber-pin-${barber.id}`}>
+                      Novo PIN (opcional)
+                    </label>
+                    <input
+                      id={`barber-pin-${barber.id}`}
+                      type="password"
+                      inputMode="numeric"
+                      className="form-input"
+                      placeholder="Manter atual"
+                      value={barber.newPin}
+                      onChange={(e) =>
+                        handleBarberChange(barber.id, 'newPin', e.target.value)
                       }
                     />
                   </div>

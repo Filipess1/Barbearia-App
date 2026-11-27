@@ -1,7 +1,8 @@
-import { CheckCircle2, HeartHandshake, Info, Smile, User, X, Zap } from 'lucide-react';
+import { CheckCircle2, HeartHandshake, Info, MessageCircle, Smile, User, X, Zap } from 'lucide-react';
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { Appointment, Barber, BookingType, DayOption, ServiceItem } from '../types';
 import { formatBRL, generateTimeSlots } from '../data/barbershopData';
+import { buildBarberOccupiedMap, buildWhatsAppUrl, canBookAtTime } from '../utils/scheduleUtils';
 
 interface BookingModalProps {
   isOpen: boolean;
@@ -65,6 +66,7 @@ export function BookingModal({
     dateLabel: string;
     time: string;
     clientName: string;
+    clientPhone: string;
     bookingType: BookingType;
   } | null>(null);
 
@@ -121,15 +123,25 @@ export function BookingModal({
     const allSlots = generateTimeSlots(barber.workStart, barber.workEnd, 30);
     const lunch = new Set(getLunchSlots(barberId, date));
     const unavail = new Set(getUnavailableSlots(barberId, date));
-    const occupied = new Set(
-      appointments
-        .filter((a) => a.barberId === barberId && a.date === date)
-        .map((a) => a.time)
+    const occMap = buildBarberOccupiedMap(appointments, services, barberId, date);
+    const occupied = new Set(occMap.keys());
+    const srv = services.find((s) => s.id === serviceId);
+    const duration = isWalkInMode ? 30 : srv?.durationMinutes ?? 30;
+
+    return allSlots.filter((t) =>
+      canBookAtTime(barber, t, duration, lunch, unavail, occupied)
     );
-    return allSlots.filter(
-      (t) => !lunch.has(t) && !unavail.has(t) && !occupied.has(t)
-    );
-  }, [barbers, barberId, date, appointments, getLunchSlots, getUnavailableSlots]);
+  }, [
+    barbers,
+    barberId,
+    date,
+    appointments,
+    services,
+    serviceId,
+    isWalkInMode,
+    getLunchSlots,
+    getUnavailableSlots,
+  ]);
 
   useEffect(() => {
     if (availableTimes.length > 0 && !availableTimes.includes(time)) {
@@ -192,6 +204,7 @@ export function BookingModal({
       dateLabel: day?.label ?? date,
       time,
       clientName: trimmedName,
+      clientPhone: clientPhone.trim(),
       bookingType,
     });
   };
@@ -258,8 +271,31 @@ export function BookingModal({
             </div>
           </div>
 
-          <div className="modal-footer">
-            <button type="button" className="btn-primary" onClick={onClose} style={{ width: '100%' }}>
+          <div className="modal-footer" style={{ flexWrap: 'wrap' }}>
+            <a
+              href={buildWhatsAppUrl(
+                confirmedSummary.clientPhone,
+                `Olá! Agendamento confirmado na Barbearia: ${confirmedSummary.serviceName} com ${confirmedSummary.barberName} em ${confirmedSummary.dateLabel} às ${confirmedSummary.time}. (Obs: os atendimentos podem sofrer pequenas variações de alguns minutos.)`
+              )}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="btn-secondary"
+              style={{
+                flex: '1 1 auto',
+                textDecoration: 'none',
+                color: 'var(--emerald)',
+                borderColor: 'var(--emerald-border)',
+              }}
+            >
+              <MessageCircle size={16} />
+              Enviar no WhatsApp
+            </a>
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={onClose}
+              style={{ flex: '1 1 auto' }}
+            >
               Entendi, Fechar
             </button>
           </div>

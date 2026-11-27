@@ -2,6 +2,7 @@ import {
   CalendarCheck,
   CalendarDays,
   ClipboardList,
+  DollarSign,
   Plus,
   Scissors,
   UserCircle2,
@@ -9,7 +10,7 @@ import {
 import { useState } from 'react';
 import { Barber, UserSession } from '../types';
 
-export type AppTab = 'horarios' | 'tabela' | 'atendimento' | 'meus-agendamentos';
+export type AppTab = 'horarios' | 'tabela' | 'atendimento' | 'financeiro' | 'meus-agendamentos';
 
 interface HeaderProps {
   activeTab: AppTab;
@@ -121,14 +122,24 @@ export function Header({
               Meus Horários
             </button>
           ) : (
-            <button
-              type="button"
-              className={`nav-tab ${activeTab === 'atendimento' ? 'active' : ''}`}
-              onClick={() => onSelectTab('atendimento')}
-            >
-              <ClipboardList size={16} />
-              Atendimento ({todayCount})
-            </button>
+            <>
+              <button
+                type="button"
+                className={`nav-tab ${activeTab === 'atendimento' ? 'active' : ''}`}
+                onClick={() => onSelectTab('atendimento')}
+              >
+                <ClipboardList size={16} />
+                Atendimento ({todayCount})
+              </button>
+              <button
+                type="button"
+                className={`nav-tab ${activeTab === 'financeiro' ? 'active' : ''}`}
+                onClick={() => onSelectTab('financeiro')}
+              >
+                <DollarSign size={16} />
+                Financeiro
+              </button>
+            </>
           )}
         </nav>
 
@@ -180,14 +191,24 @@ export function Header({
             <span>Meus</span>
           </button>
         ) : (
-          <button
-            type="button"
-            className={`mobile-nav-item ${activeTab === 'atendimento' ? 'active' : ''}`}
-            onClick={() => onSelectTab('atendimento')}
-          >
-            <ClipboardList size={19} />
-            <span>Agenda ({todayCount})</span>
-          </button>
+          <>
+            <button
+              type="button"
+              className={`mobile-nav-item ${activeTab === 'atendimento' ? 'active' : ''}`}
+              onClick={() => onSelectTab('atendimento')}
+            >
+              <ClipboardList size={19} />
+              <span>Agenda ({todayCount})</span>
+            </button>
+            <button
+              type="button"
+              className={`mobile-nav-item ${activeTab === 'financeiro' ? 'active' : ''}`}
+              onClick={() => onSelectTab('financeiro')}
+            >
+              <DollarSign size={19} />
+              <span>Caixa</span>
+            </button>
+          </>
         )}
 
         <button type="button" className="mobile-nav-item" onClick={onOpenAccess}>

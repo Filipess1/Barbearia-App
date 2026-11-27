@@ -1,7 +1,8 @@
-import { Calendar, Clock, Scissors, Trash2, User, X } from 'lucide-react';
+import { Calendar, Clock, MessageCircle, Scissors, Trash2, User, X } from 'lucide-react';
 import { useState } from 'react';
 import { Appointment, Barber, DayOption, ServiceItem } from '../types';
 import { formatBRL } from '../data/barbershopData';
+import { buildWhatsAppUrl } from '../utils/scheduleUtils';
 
 interface AppointmentActionModalProps {
   appointment: Appointment | null;
@@ -124,7 +125,20 @@ export function AppointmentActionModal({
           ) : null}
         </div>
 
-        <div className="modal-footer">
+        <div className="modal-footer" style={{ flexWrap: 'wrap' }}>
+          <a
+            href={buildWhatsAppUrl(
+              appointment.clientPhone,
+              `Olá ${appointment.clientName}! Lembrando do seu horário (${service?.name ?? 'Corte'}) com ${barber?.name ?? 'nosso barbeiro'} em ${day?.label ?? appointment.date} às ${appointment.time}.`
+            )}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="btn-secondary"
+            style={{ textDecoration: 'none', color: 'var(--emerald)', borderColor: 'var(--emerald-border)' }}
+          >
+            <MessageCircle size={15} />
+            WhatsApp
+          </a>
           <button
             type="button"
             className="btn-secondary"

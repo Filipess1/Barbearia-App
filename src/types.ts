@@ -4,6 +4,8 @@ export type AppointmentStatus = 'Aguardando' | 'Em Atendimento' | 'Concluído';
 
 export type BookingType = 'normal' | 'preferencial' | 'kids';
 
+export type PaymentMethod = 'Pix' | 'Dinheiro' | 'Cartão';
+
 export type ProSlotMode = 'book' | 'lunch' | 'unavailable';
 
 export type UserSession =
@@ -34,6 +36,7 @@ export interface Barber {
   workEnd: string;   // HH:mm
   lunchStart: string; // HH:mm
   lunchEnd: string;   // HH:mm
+  commissionPercent?: number;
   featuredServices: string[];
 }
 
@@ -59,7 +62,26 @@ export interface Appointment {
   status: AppointmentStatus;
   bookingType?: BookingType;
   isWalkIn?: boolean;
+  paymentMethod?: PaymentMethod;
+  finalPrice?: number;
   notes?: string;
+}
+
+export interface WaitlistEntry {
+  id: string;
+  clientName: string;
+  clientPhone: string;
+  preferredBarberId: 'any' | string;
+  serviceId: string;
+  bookingType: BookingType;
+  date: string; // YYYY-MM-DD
+  createdAt: string;
+}
+
+export interface ShopSettings {
+  shopName: string;
+  shopLogoUrl: string;
+  loyaltyGoal?: number;
 }
 
 export interface DayOption {

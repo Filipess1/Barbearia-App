@@ -42,11 +42,24 @@ export function AccessModal({
     onClose();
   };
 
-  const handleProSubmit = (e: FormEvent) => {
+  const handleProSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (pin.trim() !== '1234') {
-      setPinError('PIN incorreto. Use 1234 para acesso.');
-      return;
+    try {
+      const res = await fetch('/api/auth/verify-pin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ barberId: proBarberId, pin: pin.trim() }),
+      });
+      const json = await res.json();
+      if (!res.ok || !json.ok) {
+        setPinError(json.error || 'PIN incorreto.');
+        return;
+      }
+    } catch {
+      if (pin.trim() !== '1234') {
+        setPinError('PIN incorreto. Use 1234 para acesso.');
+        return;
+      }
     }
     setPinError('');
     onChangeSession({

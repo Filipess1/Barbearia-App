@@ -29,6 +29,7 @@ const DEFAULT_BARBERS = [
     workEnd: '19:00',
     lunchStart: '12:00',
     lunchEnd: '13:00',
+    commissionPercent: 50,
     featuredServices: ['corte-degrade', 'corte-navalhado', 'combo-completo'],
   },
   {
@@ -48,6 +49,7 @@ const DEFAULT_BARBERS = [
     workEnd: '19:30',
     lunchStart: '13:00',
     lunchEnd: '14:00',
+    commissionPercent: 50,
     featuredServices: ['corte-tesoura', 'corte-social', 'barba-terapia'],
   },
   {
@@ -67,6 +69,7 @@ const DEFAULT_BARBERS = [
     workEnd: '20:00',
     lunchStart: '13:30',
     lunchEnd: '14:30',
+    commissionPercent: 50,
     featuredServices: ['corte-freestyle', 'platinado', 'combo-completo'],
   },
 ];
@@ -213,6 +216,35 @@ function createInitialAppointments() {
   ];
 }
 
+const SERVICE_DURATIONS = {
+  'corte-social': 30,
+  'corte-degrade': 45,
+  'corte-navalhado': 45,
+  'corte-tesoura': 45,
+  'corte-freestyle': 45,
+  'corte-infantil': 30,
+  'barba-tradicional': 30,
+  'barba-terapia': 45,
+  'pezinho-acabamento': 15,
+  'sobrancelha-navalha': 15,
+  'combo-completo': 60,
+  'combo-vip': 90,
+  'platinado': 120,
+  'hidratacao-capilar': 30,
+};
+
+function getOccupiedSlotTimes(startTime, durationMinutes = 30) {
+  const [sh, sm] = startTime.split(':').map(Number);
+  const startMin = sh * 60 + sm;
+  const blocks = Math.max(1, Math.ceil(durationMinutes / 30));
+  const out = [];
+  for (let i = 0; i < blocks; i++) {
+    const m = startMin + i * 30;
+    out.push(`${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`);
+  }
+  return out;
+}
+
 function createInitialDb() {
   return {
     appointments: createInitialAppointments(),
@@ -220,11 +252,24 @@ function createInitialDb() {
     shopSettings: {
       shopName: 'BARBEARIA CLÁSSICA',
       shopLogoUrl: '',
+      loyaltyGoal: 10,
     },
     lunchOverrides: {},
     unavailableSlots: {},
     barberPhotos: {},
+    waitlist: [],
+    proPins: {
+      all: '1234',
+      lucas: '1234',
+      rafael: '1234',
+      thiago: '1234',
+    },
   };
+}
+
+function publicState() {
+  const { proPins: _ignored, ...rest } = db;
+  return rest;
 }
 
 function loadDb() {
@@ -261,7 +306,7 @@ function saveDb() {
 }
 
 function broadcastState() {
-  const payload = `event: state\ndata: ${JSON.stringify(db)}\n\n`;
+  const payload = `event: state\ndata: ${JSON.stringify(publicState())}\n\n`;
   for (const res of sseClients) {
     try {
       res.write(payload);
@@ -362,7 +407,18 @@ const server = http.createServer(async (req, res) => {
 
     // Full state
     if (req.method === 'GET' && pathname === '/api/state') {
-      return sendJson(res, 200, db);
+      return sendJson(res, 200, publicState());
+    }
+
+    // Verify PIN
+    if (req.method === 'POST' && pathname === '/api/auth/verify-pin') {
+      const { barberId, pin } = await readJsonBody(req);
+      const pins = db.proPins || { all: '1234', lucas: '1234', rafael: '1234', thiago: '1234' };
+      const expected = String(pins[barberId] || pins.all || '1234');
+      if (String(pin || '').trim() !== expected) {
+        return sendJson(res, 401, { ok: false, error: 'PIN incorreto.' });
+      }
+      return sendJson(res, 200, { ok: true });
     }
 
     // Server-Sent Events for real-time sync
@@ -373,7 +429,7 @@ const server = http.createServer(async (req, res) => {
         Connection: 'keep-alive',
         'Access-Control-Allow-Origin': '*',
       });
-      res.write(`event: state\ndata: ${JSON.stringify(db)}\n\n`);
+      res.write(`event: state\ndata: ${JSON.stringify(publicState())}\n\n`);
       sseClients.add(res);
       const keepAlive = setInterval(() => {
         try {
@@ -431,14 +487,26 @@ const server = http.createServer(async (req, res) => {
         }
       }
 
-      const lunch = getLunchSlots(barberId, date);
-      const unavail = getUnavailableSlots(barberId, date);
-      const alreadyBooked = db.appointments.some(
-        (a) => a.barberId === barberId && a.date === date && a.time === time
+      const lunch = new Set(getLunchSlots(barberId, date));
+      const unavail = new Set(getUnavailableSlots(barberId, date));
+      const occupiedSet = new Set();
+      db.appointments
+        .filter((a) => a.barberId === barberId && a.date === date)
+        .forEach((a) => {
+          const dur = SERVICE_DURATIONS[a.serviceId] || 30;
+          getOccupiedSlotTimes(a.time, dur).forEach((s) => occupiedSet.add(s));
+        });
+
+      const requestedDuration = isWalkIn ? 30 : SERVICE_DURATIONS[serviceId] || 30;
+      const neededSlots = getOccupiedSlotTimes(time, requestedDuration);
+      const conflict = neededSlots.some(
+        (s) => lunch.has(s) || unavail.has(s) || occupiedSet.has(s)
       );
 
-      if (lunch.includes(time) || unavail.includes(time) || alreadyBooked) {
-        return sendJson(res, 409, { error: 'Este horário acabou de ser ocupado ou bloqueado.' });
+      if (conflict) {
+        return sendJson(res, 409, {
+          error: 'Este horário (ou a duração do serviço) conflita com outro agendamento ou bloqueio.',
+        });
       }
 
       const newApt = {
@@ -456,10 +524,10 @@ const server = http.createServer(async (req, res) => {
 
       db.appointments.push(newApt);
       saveDb();
-      return sendJson(res, 201, { appointment: newApt, state: db });
+      return sendJson(res, 201, { appointment: newApt, state: publicState() });
     }
 
-    // Update appointment status
+    // Update appointment status / payment
     if (req.method === 'PATCH' && pathname.startsWith('/api/appointments/')) {
       const id = decodeURIComponent(pathname.replace('/api/appointments/', ''));
       const body = await readJsonBody(req);
@@ -469,8 +537,14 @@ const server = http.createServer(async (req, res) => {
       if (body.status) {
         db.appointments[idx].status = body.status;
       }
+      if (body.paymentMethod) {
+        db.appointments[idx].paymentMethod = body.paymentMethod;
+      }
+      if (typeof body.finalPrice === 'number') {
+        db.appointments[idx].finalPrice = body.finalPrice;
+      }
       saveDb();
-      return sendJson(res, 200, { appointment: db.appointments[idx], state: db });
+      return sendJson(res, 200, { appointment: db.appointments[idx], state: publicState() });
     }
 
     // Delete / cancel appointment
@@ -482,7 +556,7 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 404, { error: 'Agendamento não encontrado.' });
       }
       saveDb();
-      return sendJson(res, 200, { ok: true, state: db });
+      return sendJson(res, 200, { ok: true, state: publicState() });
     }
 
     // Reset demo schedule
@@ -490,8 +564,43 @@ const server = http.createServer(async (req, res) => {
       db.appointments = createInitialAppointments();
       db.lunchOverrides = {};
       db.unavailableSlots = {};
+      db.waitlist = [];
       saveDb();
-      return sendJson(res, 200, { state: db });
+      return sendJson(res, 200, { state: publicState() });
+    }
+
+    // Waitlist endpoints
+    if (req.method === 'POST' && pathname === '/api/waitlist') {
+      const { clientName, clientPhone, preferredBarberId, serviceId, bookingType, date } =
+        await readJsonBody(req);
+      if (!String(clientName || '').trim()) {
+        return sendJson(res, 400, { error: 'Nome é obrigatório.' });
+      }
+      const now = new Date();
+      const createdAt = `${String(now.getHours()).padStart(2, '0')}:${String(
+        now.getMinutes()
+      ).padStart(2, '0')}`;
+      const entry = {
+        id: `wl-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        clientName: String(clientName).trim(),
+        clientPhone: String(clientPhone || '').trim(),
+        preferredBarberId: preferredBarberId || 'any',
+        serviceId: serviceId || 'corte-social',
+        bookingType: bookingType || 'normal',
+        date: date || formatDateYYYYMMDD(now),
+        createdAt,
+      };
+      if (!Array.isArray(db.waitlist)) db.waitlist = [];
+      db.waitlist.push(entry);
+      saveDb();
+      return sendJson(res, 201, { entry, state: publicState() });
+    }
+
+    if (req.method === 'DELETE' && pathname.startsWith('/api/waitlist/')) {
+      const id = decodeURIComponent(pathname.replace('/api/waitlist/', ''));
+      db.waitlist = (db.waitlist || []).filter((w) => w.id !== id);
+      saveDb();
+      return sendJson(res, 200, { ok: true, state: publicState() });
     }
 
     // Toggle lunch slot
@@ -572,12 +681,14 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { blocked: !allAlreadyBlocked, state: db });
     }
 
-    // Update shop settings & barber names
+    // Update shop settings, barber names, commissions & PINs
     if (req.method === 'PUT' && pathname === '/api/shop') {
-      const { shopName, shopLogoUrl, barberUpdates } = await readJsonBody(req);
+      const { shopName, shopLogoUrl, loyaltyGoal, barberUpdates, pinUpdates } =
+        await readJsonBody(req);
       db.shopSettings = {
         shopName: String(shopName || 'BARBEARIA CLÁSSICA').trim() || 'BARBEARIA CLÁSSICA',
         shopLogoUrl: String(shopLogoUrl || ''),
+        loyaltyGoal: Math.max(3, Math.min(30, Number(loyaltyGoal) || 10)),
       };
       if (Array.isArray(barberUpdates)) {
         db.barbers = db.barbers.map((b) => {
@@ -597,11 +708,23 @@ const server = http.createServer(async (req, res) => {
             initials,
             role: String(upd.role || b.role).trim() || b.role,
             specialty: String(upd.specialty || b.specialty).trim() || b.specialty,
+            commissionPercent:
+              typeof upd.commissionPercent === 'number'
+                ? Math.max(0, Math.min(100, upd.commissionPercent))
+                : b.commissionPercent ?? 50,
           };
         });
       }
+      if (pinUpdates && typeof pinUpdates === 'object') {
+        if (!db.proPins) db.proPins = { all: '1234', lucas: '1234', rafael: '1234', thiago: '1234' };
+        Object.entries(pinUpdates).forEach(([k, v]) => {
+          if (String(v || '').trim()) {
+            db.proPins[k] = String(v).trim();
+          }
+        });
+      }
       saveDb();
-      return sendJson(res, 200, { state: db });
+      return sendJson(res, 200, { state: publicState() });
     }
 
     // Reset shop defaults

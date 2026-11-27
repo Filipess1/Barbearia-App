@@ -397,10 +397,32 @@ bridge_script = f"""
   if (!cloudDb || typeof cloudDb !== 'object') cloudDb = {{}};
   if (!Array.isArray(cloudDb.appointments)) cloudDb.appointments = [];
   if (!Array.isArray(cloudDb.barbers) || cloudDb.barbers.length === 0) cloudDb.barbers = JSON.parse(JSON.stringify(DEFAULT_BARBERS));
-  if (!cloudDb.shopSettings) cloudDb.shopSettings = {{ shopName: 'BARBEARIA CLÁSSICA', shopLogoUrl: '' }};
+  if (!cloudDb.shopSettings) cloudDb.shopSettings = {{ shopName: 'BARBEARIA CLÁSSICA', shopLogoUrl: '', loyaltyGoal: 10 }};
   if (!cloudDb.lunchOverrides) cloudDb.lunchOverrides = {{}};
   if (!cloudDb.unavailableSlots) cloudDb.unavailableSlots = {{}};
   if (!cloudDb.barberPhotos) cloudDb.barberPhotos = {{}};
+  if (!Array.isArray(cloudDb.waitlist)) cloudDb.waitlist = [];
+  if (!cloudDb.proPins) cloudDb.proPins = {{ all: '1234', lucas: '1234', rafael: '1234', thiago: '1234' }};
+
+  const SERVICE_DURATIONS = {{
+    'corte-social': 30, 'corte-degrade': 45, 'corte-navalhado': 45,
+    'corte-tesoura': 45, 'corte-freestyle': 45, 'corte-infantil': 30,
+    'barba-tradicional': 30, 'barba-terapia': 45, 'pezinho-acabamento': 15,
+    'sobrancelha-navalha': 15, 'combo-completo': 60, 'combo-vip': 90,
+    'platinado': 120, 'hidratacao-capilar': 30
+  }};
+
+  function getOccupiedSlotTimes(startTime, durationMinutes) {{
+    const [sh, sm] = startTime.split(':').map(Number);
+    const startMin = sh * 60 + sm;
+    const blocks = Math.max(1, Math.ceil((durationMinutes || 30) / 30));
+    const out = [];
+    for (let i = 0; i < blocks; i++) {{
+      const m = startMin + i * 30;
+      out.push(String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0'));
+    }}
+    return out;
+  }}
 
   function generateTimeSlots(workStart, workEnd) {{
     const [sh, sm] = workStart.split(':').map(Number);
@@ -514,6 +536,15 @@ bridge_script = f"""
       return jsonResp(200, cloudDb);
     }}
 
+    if (method === 'POST' && url === '/api/auth/verify-pin') {{
+      const pins = cloudDb.proPins || {{ all: '1234', lucas: '1234', rafael: '1234', thiago: '1234' }};
+      const expected = String(pins[body.barberId] || pins.all || '1234');
+      if (String(body.pin || '').trim() !== expected) {{
+        return jsonResp(401, {{ ok: false, error: 'PIN incorreto.' }});
+      }}
+      return jsonResp(200, {{ ok: true }});
+    }}
+
     if (method === 'POST' && url === '/api/appointments') {{
       await pullSupabase();
       const {{ barberId, serviceId, date, time, clientName, clientPhone, bookingType, isWalkIn, fromClient }} = body;
@@ -535,9 +566,17 @@ bridge_script = f"""
       }}
       const lunch = getLunchSlots(barberId, date);
       const unavail = getUnavailableSlots(barberId, date);
-      const taken = cloudDb.appointments.some(a => a.barberId === barberId && a.date === date && a.time === time);
-      if (lunch.includes(time) || unavail.includes(time) || taken) {{
-        return jsonResp(409, {{ error: 'Este horário acabou de ser ocupado ou bloqueado.' }});
+      const occupiedSet = new Set();
+      cloudDb.appointments
+        .filter(a => a.barberId === barberId && a.date === date)
+        .forEach(a => {{
+          const dur = SERVICE_DURATIONS[a.serviceId] || 30;
+          getOccupiedSlotTimes(a.time, dur).forEach(s => occupiedSet.add(s));
+        }});
+      const reqDur = isWalkIn ? 30 : (SERVICE_DURATIONS[serviceId] || 30);
+      const needed = getOccupiedSlotTimes(time, reqDur);
+      if (needed.some(s => lunch.includes(s) || unavail.includes(s) || occupiedSet.has(s))) {{
+        return jsonResp(409, {{ error: 'Este horário (ou duração do serviço) conflita com outro agendamento ou bloqueio.' }});
       }}
       const apt = {{
         id: 'apt-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
@@ -556,11 +595,39 @@ bridge_script = f"""
     if (method === 'PATCH' && url.startsWith('/api/appointments/')) {{
       const id = decodeURIComponent(url.replace('/api/appointments/', ''));
       const idx = cloudDb.appointments.findIndex(a => a.id === id);
-      if (idx !== -1 && body.status) {{
-        cloudDb.appointments[idx].status = body.status;
+      if (idx !== -1) {{
+        if (body.status) cloudDb.appointments[idx].status = body.status;
+        if (body.paymentMethod) cloudDb.appointments[idx].paymentMethod = body.paymentMethod;
+        if (typeof body.finalPrice === 'number') cloudDb.appointments[idx].finalPrice = body.finalPrice;
         await pushSupabase();
       }}
       return jsonResp(200, {{ state: cloudDb }});
+    }}
+
+    if (method === 'POST' && url === '/api/waitlist') {{
+      const now = new Date();
+      const createdAt = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
+      const entry = {{
+        id: 'wl-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+        clientName: String(body.clientName || '').trim(),
+        clientPhone: String(body.clientPhone || '').trim(),
+        preferredBarberId: body.preferredBarberId || 'any',
+        serviceId: body.serviceId || 'corte-social',
+        bookingType: body.bookingType || 'normal',
+        date: body.date,
+        createdAt
+      }};
+      if (!Array.isArray(cloudDb.waitlist)) cloudDb.waitlist = [];
+      cloudDb.waitlist.push(entry);
+      await pushSupabase();
+      return jsonResp(201, {{ entry, state: cloudDb }});
+    }}
+
+    if (method === 'DELETE' && url.startsWith('/api/waitlist/')) {{
+      const id = decodeURIComponent(url.replace('/api/waitlist/', ''));
+      cloudDb.waitlist = (cloudDb.waitlist || []).filter(w => w.id !== id);
+      await pushSupabase();
+      return jsonResp(200, {{ ok: true, state: cloudDb }});
     }}
 
     if (method === 'DELETE' && url.startsWith('/api/appointments/')) {{
@@ -625,10 +692,11 @@ bridge_script = f"""
     }}
 
     if (method === 'PUT' && url === '/api/shop') {{
-      const {{ shopName, shopLogoUrl, barberUpdates }} = body;
+      const {{ shopName, shopLogoUrl, loyaltyGoal, barberUpdates, pinUpdates }} = body;
       cloudDb.shopSettings = {{
         shopName: String(shopName || 'BARBEARIA CLÁSSICA').trim() || 'BARBEARIA CLÁSSICA',
-        shopLogoUrl: String(shopLogoUrl || '')
+        shopLogoUrl: String(shopLogoUrl || ''),
+        loyaltyGoal: Math.max(3, Math.min(30, Number(loyaltyGoal) || 10))
       }};
       if (Array.isArray(barberUpdates)) {{
         cloudDb.barbers = cloudDb.barbers.map(b => {{
@@ -638,7 +706,21 @@ bridge_script = f"""
           const parts = name.split(/\\s+/);
           const nickname = parts[0] || name;
           const initials = parts.length >= 2 ? (parts[0][0] + parts[parts.length - 1][0]).toUpperCase() : name.slice(0, 2).toUpperCase();
-          return {{ ...b, name, nickname, initials, role: u.role || b.role, specialty: u.specialty || b.specialty }};
+          return {{
+            ...b,
+            name,
+            nickname,
+            initials,
+            role: u.role || b.role,
+            specialty: u.specialty || b.specialty,
+            commissionPercent: typeof u.commissionPercent === 'number' ? u.commissionPercent : (b.commissionPercent ?? 50)
+          }};
+        }});
+      }}
+      if (pinUpdates && typeof pinUpdates === 'object') {{
+        if (!cloudDb.proPins) cloudDb.proPins = {{ all: '1234', lucas: '1234', rafael: '1234', thiago: '1234' }};
+        Object.entries(pinUpdates).forEach(([k, v]) => {{
+          if (String(v || '').trim()) cloudDb.proPins[k] = String(v).trim();
         }});
       }}
       await pushSupabase();
