@@ -223,6 +223,29 @@ export function App() {
     }
   };
 
+  const handleToggleUnavailablePeriod = async (
+    barberId: string,
+    period: 'morning' | 'afternoon' | 'day'
+  ) => {
+    try {
+      const res = await fetch('/api/slots/unavailable-period', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ barberId, date: selectedDate, period }),
+      });
+      const json = await res.json();
+      if (json.state) applyServerState(json.state);
+      const label = period === 'morning' ? 'manhã' : period === 'afternoon' ? 'tarde' : 'dia inteiro';
+      showToast(
+        json.blocked
+          ? `Período (${label}) marcado como indisponível.`
+          : `Período (${label}) liberado.`
+      );
+    } catch {
+      showToast('Erro ao comunicar com o servidor.');
+    }
+  };
+
   const handleUploadBarberPhoto = async (barberId: string, dataUrl: string) => {
     try {
       const res = await fetch(`/api/barbers/${encodeURIComponent(barberId)}/photo`, {
@@ -566,6 +589,7 @@ export function App() {
             getUnavailableSlots={getUnavailableSlots}
             onToggleLunchSlot={handleToggleLunchSlot}
             onToggleUnavailableSlot={handleToggleUnavailableSlot}
+            onToggleUnavailablePeriod={handleToggleUnavailablePeriod}
             onSelectSlot={(barberId, time) =>
               setModalState({
                 isOpen: true,

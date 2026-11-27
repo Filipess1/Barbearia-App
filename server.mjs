@@ -678,7 +678,7 @@ const server = http.createServer(async (req, res) => {
         db.unavailableSlots[key] = Array.from(cur);
       }
       saveDb();
-      return sendJson(res, 200, { blocked: !allAlreadyBlocked, state: db });
+      return sendJson(res, 200, { blocked: !allAlreadyBlocked, state: publicState() });
     }
 
     // Update shop settings, barber names, commissions & PINs
